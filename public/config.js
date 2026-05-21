@@ -2,7 +2,7 @@ window.DUNE_CONFIG = {
   appTitle: 'Dune Queue Activity PoC - PKCE',
   genesysRegion: 'mypurecloud.ie',
   clientId: 'e6f47e59-cd46-4e5e-a60d-d88e2a7c0b9b',
-  redirectUri: 'http://localhost:3000/',
+  redirectUri: 'https://genesys-queue-poc-dune-pkce.vercel.app/',
   timezoneLabel: 'Europe/Belgrade',
   refreshSeconds: 60,
   queues: [
