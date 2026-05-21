@@ -1,4 +1,4 @@
 Client ID: e6f47e59-cd46-4e5e-a60d-d88e2a7c0b9b
-Client Secret: G59C__WmvLfnsL7wJ1vs-WO4z5eR7Z1Cd6nzQpJaN9FStW4Mo9E1ZdidfXaU
+Client Secret: "paz da neću da ti kažem"
 Redirect: http://localhost:3000/
 Scope: analytics:readonly ; routing:readonly ; users:readonly
