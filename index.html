@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dune Queue Activity PoC - PKCE</title>
+  <script src="/config.js"></script>
+  <style>
+    :root { --bg:#f3f6fb; --card:#fff; --text:#061a3a; --muted:#53627c; --line:#d9e1ee; --blue:#2f5bea; --red:#d61f3c; --green:#0a7a3d; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: Arial, Helvetica, sans-serif; color:var(--text); background:var(--bg); }
+    header { background:#fff; border-bottom:1px solid var(--line); padding:24px 28px; display:flex; justify-content:space-between; align-items:flex-start; gap:16px; }
+    h1 { margin:0 0 8px; font-size:26px; }
+    .sub { color:var(--muted); font-size:14px; }
+    main { padding:28px; }
+    .toolbar { display:flex; align-items:center; gap:16px; margin-bottom:22px; flex-wrap:wrap; }
+    button { border:0; background:var(--blue); color:#fff; font-weight:700; padding:12px 18px; border-radius:8px; cursor:pointer; }
+    button.secondary { background:#64748b; }
+    button.danger { background:#b42318; }
+    button:disabled { opacity:.6; cursor:not-allowed; }
+    .status { color:var(--muted); font-size:14px; }
+    .cards { display:grid; grid-template-columns: repeat(4, minmax(180px, 1fr)); gap:16px; margin-bottom:22px; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px; box-shadow:0 1px 4px rgba(12,30,66,.08); }
+    .label { color:var(--muted); font-size:14px; margin-bottom:12px; }
+    .value { font-size:32px; font-weight:800; }
+    .tablewrap { background:var(--card); border:1px solid var(--line); border-radius:12px; overflow:auto; box-shadow:0 1px 4px rgba(12,30,66,.08); }
+    table { border-collapse:collapse; width:100%; min-width:1200px; }
+    th, td { padding:14px 12px; text-align:left; border-bottom:1px solid var(--line); white-space:nowrap; }
+    th { font-size:13px; letter-spacing:.03em; text-transform:uppercase; background:#f8fafc; }
+    td { font-size:16px; }
+    td.queue { font-weight:800; }
+    .red { color:var(--red); font-weight:800; }
+    .green { color:var(--green); font-weight:800; }
+    .target { color:#8b95a7; font-weight:800; }
+    .foot { margin-top:12px; color:var(--muted); font-size:13px; }
+    .error { background:#fff1f2; color:#9f1239; border:1px solid #fecdd3; padding:12px; border-radius:8px; margin-bottom:16px; display:none; white-space:pre-wrap; }
+    .authbox { background:#fff; border:1px solid var(--line); border-radius:12px; padding:20px; max-width:720px; box-shadow:0 1px 4px rgba(12,30,66,.08); }
+    code { background:#eef2ff; padding:2px 5px; border-radius:4px; }
+    @media (max-width:900px){ .cards{grid-template-columns:1fr 1fr;} header{flex-direction:column;} }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1 id="title">Dune Queue Activity PoC - PKCE</h1>
+      <div class="sub">Day-to-now queue activity dashboard, refreshed every 60 seconds. Authenticated with Genesys Cloud PKCE.</div>
+    </div>
+    <div class="sub" id="lastUpdated">Not loaded</div>
+  </header>
+
+  <main>
+    <section id="authSection" class="authbox" style="display:none;">
+      <h2>Login required</h2>
+      <p class="sub">This version uses Genesys Cloud Authorization Code + PKCE. No client secret is stored in the browser.</p>
+      <p class="sub">Configured region: <code id="regionText"></code></p>
+      <button id="loginBtn">Login with Genesys Cloud</button>
+    </section>
+
+    <section id="appSection" style="display:none;">
+      <div class="toolbar">
+        <button id="refreshBtn">Refresh now</button>
+        <button class="secondary" id="logoutBtn">Logout</button>
+        <span class="status" id="loadStatus">Loaded</span>
+      </div>
+      <div class="error" id="errorBox"></div>
+      <div class="cards">
+        <div class="card"><div class="label">Total Offered</div><div class="value" id="totalOffered">-</div></div>
+        <div class="card"><div class="label">Total Answered</div><div class="value" id="totalAnswered">-</div></div>
+        <div class="card"><div class="label">Total Abandoned</div><div class="value" id="totalAbandoned">-</div></div>
+        <div class="card"><div class="label">Currently Waiting</div><div class="value" id="totalWaiting">-</div></div>
+      </div>
+      <div class="tablewrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Queue</th><th>Waiting</th><th>Longest Waiting</th><th>Offered</th><th>Answer</th><th>Abandon</th><th>Service Level</th><th>Avg Handle</th><th>Avg Wait</th><th>Max Wait</th><th>On Queue</th><th>Off Queue</th><th>Interacting</th><th>Idle</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <div class="foot" id="intervalText"></div>
+    </section>
+  </main>
+
+<script type="module">
+const cfg = window.DUNE_CONFIG;
+document.getElementById('title').textContent = cfg.appTitle;
+document.getElementById('regionText').textContent = cfg.genesysRegion;
+
+const apiBase = `https://api.${cfg.genesysRegion}`;
+const loginBase = `https://login.${cfg.genesysRegion}`;
+const authKey = 'dune_pkce_auth';
+const verifierKey = 'dune_pkce_verifier';
+const stateKey = 'dune_pkce_state';
+let timer = null;
+
+const $ = (id) => document.getElementById(id);
+
+function base64UrlEncode(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let str = '';
+  for (const b of bytes) str += String.fromCharCode(b);
+  return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function randomString(bytes = 64) {
+  const arr = new Uint8Array(bytes);
+  crypto.getRandomValues(arr);
+  return base64UrlEncode(arr.buffer);
+}
+async function sha256(text) {
+  const data = new TextEncoder().encode(text);
+  return crypto.subtle.digest('SHA-256', data);
+}
+async function login() {
+  const verifier = randomString(64);
+  const challenge = base64UrlEncode(await sha256(verifier));
+  const state = randomString(24);
+  sessionStorage.setItem(verifierKey, verifier);
+  sessionStorage.setItem(stateKey, state);
+  const params = new URLSearchParams({
+    response_type: 'code',
+    client_id: cfg.clientId,
+    redirect_uri: cfg.redirectUri,
+    code_challenge: challenge,
+    code_challenge_method: 'S256',
+    state
+  });
+  location.href = `${loginBase}/oauth/authorize?${params.toString()}`;
+}
+async function handleCallback() {
+  const params = new URLSearchParams(location.search);
+  const code = params.get('code');
+  const state = params.get('state');
+  const error = params.get('error');
+  if (error) throw new Error(`OAuth error: ${error} ${params.get('error_description') || ''}`);
+  if (!code) return false;
+  if (state !== sessionStorage.getItem(stateKey)) throw new Error('OAuth state mismatch.');
+  const verifier = sessionStorage.getItem(verifierKey);
+  const body = new URLSearchParams({
+    grant_type: 'authorization_code',
+    client_id: cfg.clientId,
+    code,
+    redirect_uri: cfg.redirectUri,
+    code_verifier: verifier
+  });
+  const res = await fetch(`${loginBase}/oauth/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body
+  });
+  if (!res.ok) throw new Error(`Token exchange failed: ${res.status} ${await res.text()}`);
+  const token = await res.json();
+  token.expires_at = Date.now() + ((token.expires_in || 3600) - 60) * 1000;
+  sessionStorage.setItem(authKey, JSON.stringify(token));
+  history.replaceState({}, document.title, cfg.redirectUri);
+  return true;
+}
+function getToken() {
+  const raw = sessionStorage.getItem(authKey);
+  if (!raw) return null;
+  const token = JSON.parse(raw);
+  if (!token.access_token || Date.now() > token.expires_at) return null;
+  return token.access_token;
+}
+function logout() {
+  sessionStorage.removeItem(authKey);
+  sessionStorage.removeItem(verifierKey);
+  sessionStorage.removeItem(stateKey);
+  if (timer) clearInterval(timer);
+  renderAuth();
+}
+function renderAuth() {
+  const authenticated = Boolean(getToken());
+  $('authSection').style.display = authenticated ? 'none' : 'block';
+  $('appSection').style.display = authenticated ? 'block' : 'none';
+  if (authenticated) start();
+}
+function dayInterval() {
+  const now = new Date();
+  const start = new Date(now);
+  start.setHours(0,0,0,0);
+  return `${start.toISOString()}/${now.toISOString()}`;
+}
+function msToText(ms) {
+  if (!ms || ms <= 0) return '-';
+  const s = Math.round(ms / 1000);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h) return `${h}h ${m}m ${sec}s`;
+  if (m) return `${m}m ${sec}s`;
+  return `${sec}s`;
+}
+function pct(ratio) {
+  if (ratio === null || ratio === undefined || Number.isNaN(ratio)) return '-';
+  return `${Math.round(ratio * 100)}%`;
+}
+function initRows() {
+  const map = {};
+  cfg.queues.forEach(q => map[q.id] = { id:q.id, name:q.name, waiting:0, longestWaiting:null, offered:0, answer:0, abandon:0, serviceLevel:null, target:null, avgHandle:null, avgWait:null, maxWait:null, onQueue:null, offQueue:null, interacting:null, idle:null });
+  return map;
+}
+function metricMap(metrics = []) {
+  const out = {};
+  for (const item of metrics || []) {
+    out[item.metric] = item.stats || {};
+  }
+  return out;
+}
+function findQueueId(group) {
+  return group?.group?.queueId || group?.group?.queue?.id || group?.group?.['queueId'];
+}
+function count(stats) { return stats?.count ?? 0; }
+function avg(stats) { return stats?.count ? stats.sum / stats.count : null; }
+function max(stats) { return stats?.max ?? null; }
+async function genesysPost(path, payload) {
+  const token = getToken();
+  if (!token) throw new Error('Not authenticated or token expired. Please login again.');
+  const res = await fetch(`${apiBase}${path}`, {
+    method:'POST',
+    headers:{ 'Authorization':`Bearer ${token}`, 'Content-Type':'application/json' },
+    body: JSON.stringify(payload)
+  });
+  if (!res.ok) throw new Error(`${path} failed: ${res.status} ${await res.text()}`);
+  return res.json();
+}
+async function loadData() {
+  const interval = dayInterval();
+  const queueIds = cfg.queues.map(q => q.id);
+  const rows = initRows();
+
+const aggregatePayload = {
+  interval,
+  granularity: 'PT24H',
+  groupBy: ['queueId'],
+  filter: {
+    type: 'and',
+    clauses: [
+      {
+        type: 'or',
+        predicates: queueIds.map(id => ({
+          type: 'dimension',
+          dimension: 'queueId',
+          value: id
+        }))
+      }
+    ],
+    predicates: [
+      {
+        type: 'dimension',
+        dimension: 'mediaType',
+        value: 'voice'
+      }
+    ]
+  },
+  metrics: ['nOffered','tAnswered','tAbandon','tHandle','tWait','oServiceLevel']
+};
+const obsPayload = {
+  filter: {
+    type: 'or',
+    predicates: queueIds.map(id => ({
+      type: 'dimension',
+      dimension: 'queueId',
+      value: id
+    }))
+  },
+  metrics: ['oWaiting','oLongestWaiting','oInteracting','oOnQueueUsers','oOffQueueUsers']
+};
+  const [agg, obs] = await Promise.all([
+    genesysPost('/api/v2/analytics/conversations/aggregates/query', aggregatePayload),
+    genesysPost('/api/v2/analytics/queues/observations/query', obsPayload)
+  ]);
+
+for (const r of agg.results || []) {
+  const qid = findQueueId(r);
+  if (!rows[qid]) continue;
+
+  const dataPoint = r.data?.[0];
+  const m = metricMap(dataPoint?.metrics || []);
+
+  rows[qid].offered = count(m.nOffered);
+  rows[qid].answer = count(m.tAnswered);
+  rows[qid].abandon = count(m.tAbandon);
+  rows[qid].avgHandle = avg(m.tHandle);
+  rows[qid].avgWait = avg(m.tWait);
+  rows[qid].maxWait = max(m.tWait);
+  rows[qid].serviceLevel = m.oServiceLevel?.ratio ?? rows[qid].serviceLevel;
+  rows[qid].target = m.oServiceLevel?.target ?? rows[qid].target;
+}
+
+for (const r of obs.results || []) {
+  const qid = findQueueId(r);
+  if (!rows[qid]) continue;
+
+  for (const item of r.data || []) {
+    const c = count(item.stats);
+
+    if (item.metric === 'oWaiting') rows[qid].waiting = c;
+    if (item.metric === 'oInteracting') rows[qid].interacting = c;
+    if (item.metric === 'oOnQueueUsers') rows[qid].onQueue = c;
+    if (item.metric === 'oOffQueueUsers') rows[qid].offQueue = c;
+
+    if (item.metric === 'oLongestWaiting') {
+      rows[qid].longestWaiting = item.stats?.max ?? item.stats?.calculatedMetricValue ?? null;
+    }
+ }
+}
+  return { interval, rows: Object.values(rows) };
+}
+function render(data) {
+  const totals = data.rows.reduce((a,r) => {
+    a.offered += r.offered; a.answer += r.answer; a.abandon += r.abandon; a.waiting += r.waiting || 0; return a;
+  }, {offered:0, answer:0, abandon:0, waiting:0});
+  $('totalOffered').textContent = totals.offered;
+  $('totalAnswered').textContent = totals.answer;
+  $('totalAbandoned').textContent = totals.abandon;
+  $('totalWaiting').textContent = totals.waiting;
+  $('rows').innerHTML = data.rows.map(r => {
+    const sl = pct(r.serviceLevel);
+    const slNum = r.serviceLevel == null ? null : Math.round(r.serviceLevel * 100);
+    const cls = slNum == null ? '' : (slNum >= 80 ? 'green' : 'red');
+    const target = r.target == null ? '80%' : pct(r.target);
+    return `<tr>
+      <td class="queue">${r.name}</td><td>${r.waiting ?? '-'}</td><td>${msToText(r.longestWaiting)}</td><td>${r.offered}</td><td>${r.answer}</td><td>${r.abandon}</td>
+      <td><span class="${cls}">${sl}</span> <span class="target">/ ${target}</span></td><td>${msToText(r.avgHandle)}</td><td>${msToText(r.avgWait)}</td><td>${msToText(r.maxWait)}</td>
+      <td>${r.onQueue ?? '-'}</td><td>${r.offQueue ?? '-'}</td><td>${r.interacting ?? '-'}</td><td>${r.idle ?? '-'}</td>
+    </tr>`;
+  }).join('');
+  $('intervalText').textContent = `Interval: ${data.interval} | Time zone: ${cfg.timezoneLabel}`;
+  $('lastUpdated').textContent = `Last updated: ${new Date().toLocaleString()}`;
+}
+async function refresh() {
+  $('loadStatus').textContent = 'Loading...';
+  $('refreshBtn').disabled = true;
+  $('errorBox').style.display = 'none';
+  try {
+    const data = await loadData();
+    render(data);
+    $('loadStatus').textContent = 'Loaded';
+  } catch (e) {
+    console.error(e);
+    $('errorBox').textContent = e.message || String(e);
+    $('errorBox').style.display = 'block';
+    $('loadStatus').textContent = 'Error';
+    if ((e.message || '').includes('Not authenticated')) logout();
+  } finally {
+    $('refreshBtn').disabled = false;
+  }
+}
+function start() {
+  refresh();
+  if (timer) clearInterval(timer);
+  timer = setInterval(refresh, (cfg.refreshSeconds || 60) * 1000);
+}
+$('loginBtn').addEventListener('click', login);
+$('logoutBtn').addEventListener('click', logout);
+$('refreshBtn').addEventListener('click', refresh);
+
+(async function init(){
+  try { await handleCallback(); } catch(e) { $('errorBox').textContent = e.message; $('errorBox').style.display='block'; console.error(e); }
+  renderAuth();
+})();
+</script>
+</body>
+</html>
